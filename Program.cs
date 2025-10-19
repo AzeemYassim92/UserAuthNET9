@@ -8,6 +8,8 @@ using UserAuth.Data;
 using UserAuth.Entities;
 using UserAuth.Helpers;
 using UserAuth.Services;
+using Microsoft.AspNetCore.RateLimiting;
+using System.Threading.RateLimiting; 
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -23,11 +25,33 @@ builder.Services
     .AddIdentityCore<AppUser>(opt =>
     {
         opt.User.RequireUniqueEmail = true;
+        //lockout 
+        opt.Lockout.AllowedForNewUsers = true;
+        opt.Lockout.MaxFailedAccessAttempts = 5;
+        opt.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(10); 
+        opt.SignIn.RequireConfirmedEmail = true;
     })
     .AddRoles<IdentityRole<Guid>>()
     .AddEntityFrameworkStores<AppDbContext>()
     .AddSignInManager<SignInManager<AppUser>>()
     .AddDefaultTokenProviders();
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    options.AddPolicy("tight-auth", HttpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 5,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true
+            }));
+});
+
+builder.Services.Configure<SeedAdminOptions>(builder.Configuration.GetSection("SeedAdmin"));
 
 // --- JWT Options + AuthN ---
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection("Jwt"));
@@ -51,11 +75,16 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         };
     });
 
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorization(opts =>
+{
+    opts.AddPolicy("RequireAdmin", p => p.RequireRole("Admin"));
+    opts.AddPolicy("RequireSeller", p => p.RequireRole("Seller"));
+});
 
 // -- App Services --
 builder.Services.AddScoped<TokenService>();
-builder.Services.AddScoped<UserAuth.Services.IEmailService, UserAuth.Services.EmailService>(); 
+builder.Services.AddScoped<IEmailService, EmailService>();
+builder.Services.AddScoped<IdentitySeeder>(); 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
@@ -93,7 +122,12 @@ if (app.Environment.IsDevelopment())
     app.UseSwagger();
     app.UseSwaggerUI(); 
 }
-
+using (var scope = app.Services.CreateScope())
+{
+    var seeder = scope.ServiceProvider.GetRequiredService<IdentitySeeder>();
+    await seeder.SeedAsync(); 
+}
+    app.UseRateLimiter(); 
 app.UseHttpsRedirection();
 app.UseAuthentication();
 app.UseAuthorization();

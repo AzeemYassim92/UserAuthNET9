@@ -10,7 +10,7 @@ using UserAuth.Services;
 using Microsoft.EntityFrameworkCore;
 using UserAuth.Data;
 using System.Net;
-
+using Microsoft.AspNetCore.RateLimiting; 
 
 namespace UserAuth.Controllers
 {
@@ -35,8 +35,30 @@ namespace UserAuth.Controllers
             _db = db;
         }
 
+        public class AssignRoleRequest { public string Email { get; set; } = ""; public string Role { get; set; } = ""; }
+
+        [HttpPost("assign-role")]
+        [Authorize(Roles = RoleNames.Admin)]
+        public async Task<IActionResult> AssignRole([FromBody] AssignRoleRequest req,
+            [FromServices] UserManager<AppUser> um, [FromServices] RoleManager<IdentityRole<Guid>> rm)
+        {
+            var user = await um.FindByEmailAsync(req.Email);
+            if (user is null) return NotFound("User not found.");
+
+            if (!await rm.RoleExistsAsync(req.Role))
+                return BadRequest($"Role '{req.Role}' does not exist.");
+
+            if (await um.IsInRoleAsync(user, req.Role))
+                return Ok(new { message = "User already in role." });
+
+            var res = await um.AddToRoleAsync(user, req.Role);
+            return res.Succeeded ? Ok(new { message = "Role assigned." })
+                                 : BadRequest(res.Errors.Select(e => e.Description));
+        }
+
         [HttpPost("register")]
         [AllowAnonymous]
+        [EnableRateLimiting("tight-auth")]
         public async Task<IActionResult> Register([FromBody] RegisterRequest req)
         {
             var existing = await _users.FindByEmailAsync(req.Email);
@@ -81,10 +103,15 @@ namespace UserAuth.Controllers
         //nexty
         [HttpPost("login")]
         [AllowAnonymous]
+        [EnableRateLimiting("tight-auth")]
         public async Task<IActionResult> Login([FromBody] LoginRequest req)
         {
             var user = await _users.FindByEmailAsync(req.Email);
             if (user is null) return Unauthorized();
+
+            var result = await _signIn.CheckPasswordSignInAsync(user, req.Password, lockoutOnFailure: true);
+            if (result.IsLockedOut) return Forbid();
+            if (!result.Succeeded) return Unauthorized(); 
 
             var ok = await _users.CheckPasswordAsync(user, req.Password);
             if (!ok) return Unauthorized();
